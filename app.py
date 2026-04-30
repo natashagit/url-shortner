@@ -3,11 +3,15 @@ from contextlib import contextmanager
 import uuid
 
 import psycopg
+import redis
 from psycopg.rows import dict_row
 from flask import Flask, redirect, render_template, request
 
 app = Flask(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL")
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+_redis_client = None
 
 if not DATABASE_URL:
     raise RuntimeError(
@@ -18,6 +22,24 @@ if not DATABASE_URL:
 # Accept SQLAlchemy-style URLs if provided by mistake.
 if DATABASE_URL.startswith("postgresql+psycopg://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def get_redis_client():
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    if not REDIS_URL:
+        return None
+    try:
+        _redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        _redis_client.ping()
+        return _redis_client
+    except redis.RedisError:
+        return None
+
+
+def cache_key(short_code: str) -> str:
+    return f"url:{short_code}"
 
 
 @contextmanager
@@ -88,6 +110,12 @@ def index():
                         (short_code, new_id),
                     )
                     conn.commit()
+            redis_client = get_redis_client()
+            if redis_client:
+                try:
+                    redis_client.setex(cache_key(short_code), CACHE_TTL_SECONDS, original_url)
+                except redis.RedisError:
+                    pass
             # Build the full shortened URL
             short_url = request.host_url + short_code
     return render_template('index.html', short_url=short_url)
@@ -106,6 +134,25 @@ def stats():
 
 @app.route('/<short_code>')
 def redirect_url(short_code):
+    redis_client = get_redis_client()
+    cached_url = None
+    if redis_client:
+        try:
+            cached_url = redis_client.get(cache_key(short_code))
+        except redis.RedisError:
+            cached_url = None
+
+    if cached_url:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Keep click tracking durable in PostgreSQL.
+                cur.execute(
+                    "UPDATE urls SET clicks = clicks + 1 WHERE short_code = %s",
+                    (short_code,),
+                )
+                conn.commit()
+        return redirect(cached_url)
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -120,6 +167,15 @@ def redirect_url(short_code):
                     (short_code,),
                 )
                 conn.commit()
+                if redis_client:
+                    try:
+                        redis_client.setex(
+                            cache_key(short_code),
+                            CACHE_TTL_SECONDS,
+                            url_data["original_url"],
+                        )
+                    except redis.RedisError:
+                        pass
                 return redirect(url_data["original_url"])
     return 'URL not found', 404
 

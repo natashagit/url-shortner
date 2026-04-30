@@ -1,6 +1,6 @@
-# URL Shortener (Flask + PostgreSQL)
+# URL Shortener (Flask + PostgreSQL + Redis Cache)
 
-A simple URL shortener built with Flask and PostgreSQL.
+A simple URL shortener built with Flask and PostgreSQL, with Redis caching for fast redirects.
 
 It lets you:
 - shorten long URLs into 6-character codes
@@ -13,6 +13,7 @@ It lets you:
 - Python 3
 - Flask
 - PostgreSQL
+- Redis (optional cache)
 - HTML/CSS (Jinja templates)
 
 ## Project Structure
@@ -39,7 +40,7 @@ source .venv/bin/activate
 ### 2) Install dependencies
 
 ```bash
-pip install flask psycopg[binary]
+pip install -r requirements.txt
 ```
 
 ### 3) Run the app
@@ -53,8 +54,9 @@ The app will be available at:
 
 ## How It Works
 
-- Submitting a URL on `/` creates a random 6-character short code.
+- Submitting a URL on `/` creates a Base62 short code from the row ID.
 - The mapping is stored in PostgreSQL table `urls`.
+- Redis caches `short_code -> original_url` to speed up hot redirect traffic.
 - Visiting `/<short_code>` redirects to the original URL and increments `clicks`.
 - `/stats` lists all shortened links, click counts, and creation times.
 
@@ -73,6 +75,12 @@ Set `DATABASE_URL` before running:
 export DATABASE_URL="postgresql://user:password@localhost:5432/url_shortener"
 ```
 
+- Optional Redis cache configuration:
+  ```bash
+  export REDIS_URL="redis://localhost:6379/0"
+  export CACHE_TTL_SECONDS=3600
+  ```
+
 - If a URL is entered without `http://` or `https://`, the app prepends `https://`.
 - `app.py` calls `init_db()` when started with `python app.py`, so the `urls` table is auto-created if missing.
 
@@ -87,6 +95,10 @@ Use:
 ```bash
 export DATABASE_URL="postgresql://user:password@localhost:5432/url_shortener"
 ```
+
+### Redis is unavailable
+
+The app automatically falls back to PostgreSQL-only redirects if Redis is down or not configured.
 
 ### Virtual environment not activating
 
