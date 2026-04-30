@@ -1,7 +1,6 @@
 import os
-import random
-import string
 from contextlib import contextmanager
+import uuid
 
 import psycopg
 from psycopg.rows import dict_row
@@ -37,7 +36,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS urls (
                     id BIGSERIAL PRIMARY KEY,
                     original_url TEXT NOT NULL,
-                    short_code VARCHAR(6) NOT NULL UNIQUE,
+                    short_code VARCHAR(16) NOT NULL UNIQUE,
                     clicks INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
@@ -46,23 +45,20 @@ def init_db():
             # Harden defaults for pre-existing tables created with older schema versions.
             cur.execute("ALTER TABLE urls ALTER COLUMN clicks SET DEFAULT 0")
             cur.execute("ALTER TABLE urls ALTER COLUMN created_at SET DEFAULT NOW()")
+            cur.execute("ALTER TABLE urls ALTER COLUMN short_code TYPE VARCHAR(16)")
             conn.commit()
 
 
-def generate_short_code(length=6):
-    # Build a pool of letters and digits (62 possible characters)
-    characters = string.ascii_letters + string.digits
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            while True:
-                # Generate a random 6-character code
-                code = "".join(random.choices(characters, k=length))
-                # Check if this code already exists in the database
-                cur.execute("SELECT id FROM urls WHERE short_code = %s", (code,))
-                existing = cur.fetchone()
-                # If the code is unique, return it
-                if not existing:
-                    return code
+def encode_base62(value: int) -> str:
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if value == 0:
+        return alphabet[0]
+
+    parts = []
+    while value > 0:
+        value, remainder = divmod(value, 62)
+        parts.append(alphabet[remainder])
+    return "".join(reversed(parts))
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -75,14 +71,21 @@ def index():
             # Auto-add https:// if the user didn't include a scheme
             if not original_url.startswith(('http://', 'https://')):
                 original_url = 'https://' + original_url
-            # Generate a unique short code and save the mapping
-            short_code = generate_short_code()
+            # Generate a short code from the row id using Base62 encoding.
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
+                    # Keep placeholder below VARCHAR(16) limit.
+                    placeholder_code = f"t{uuid.uuid4().hex[:12]}"
                     cur.execute(
                         "INSERT INTO urls (original_url, short_code, clicks, created_at) "
-                        "VALUES (%s, %s, %s, NOW())",
-                        (original_url, short_code, 0),
+                        "VALUES (%s, %s, %s, NOW()) RETURNING id",
+                        (original_url, placeholder_code, 0),
+                    )
+                    new_id = cur.fetchone()["id"]
+                    short_code = encode_base62(new_id)
+                    cur.execute(
+                        "UPDATE urls SET short_code = %s WHERE id = %s",
+                        (short_code, new_id),
                     )
                     conn.commit()
             # Build the full shortened URL
