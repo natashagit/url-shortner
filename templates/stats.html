@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Link Stats</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Link Stats</h1>
+        <!-- Navigation back to the shortener -->
+        <p><a href="/">Back to shortener</a></p>
+
+        <!-- Table displaying all shortened URLs and their stats -->
+        <table>
+            <thead>
+                <tr>
+                    <th>Short Code</th>
+                    <th>Original URL</th>
+                    <th>Clicks</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for url in urls %}
+                <tr>
+                    <td><a href="/{{ url['short_code'] }}">{{ url['short_code'] }}</a></td>
+                    <td>{{ url['original_url'] }}</td>
+                    <td>{{ url['clicks'] }}</td>
+                    <td>{{ url['created_at'] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
