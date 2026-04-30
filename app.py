@@ -1,6 +1,7 @@
 import os
 from contextlib import contextmanager
-import uuid
+import threading
+import time
 
 import psycopg
 import redis
@@ -12,6 +13,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 _redis_client = None
+SNOWFLAKE_WORKER_ID = int(os.getenv("SNOWFLAKE_WORKER_ID", "1"))
 
 if not DATABASE_URL:
     raise RuntimeError(
@@ -22,6 +24,63 @@ if not DATABASE_URL:
 # Accept SQLAlchemy-style URLs if provided by mistake.
 if DATABASE_URL.startswith("postgresql+psycopg://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+class SnowflakeGenerator:
+    # Twitter Snowflake layout: 41-bit time, 10-bit worker, 12-bit sequence.
+    EPOCH_MS = 1577836800000  # 2020-01-01T00:00:00Z
+    WORKER_ID_BITS = 10
+    SEQUENCE_BITS = 12
+
+    MAX_WORKER_ID = (1 << WORKER_ID_BITS) - 1
+    MAX_SEQUENCE = (1 << SEQUENCE_BITS) - 1
+
+    TIMESTAMP_SHIFT = WORKER_ID_BITS + SEQUENCE_BITS
+    WORKER_ID_SHIFT = SEQUENCE_BITS
+
+    def __init__(self, worker_id: int):
+        if worker_id < 0 or worker_id > self.MAX_WORKER_ID:
+            raise ValueError(
+                f"SNOWFLAKE_WORKER_ID must be between 0 and {self.MAX_WORKER_ID}"
+            )
+        self.worker_id = worker_id
+        self.sequence = 0
+        self.last_timestamp = -1
+        self.lock = threading.Lock()
+
+    def _current_millis(self) -> int:
+        return int(time.time() * 1000)
+
+    def _wait_next_millis(self, last_timestamp: int) -> int:
+        timestamp = self._current_millis()
+        while timestamp <= last_timestamp:
+            timestamp = self._current_millis()
+        return timestamp
+
+    def next_id(self) -> int:
+        with self.lock:
+            timestamp = self._current_millis()
+
+            if timestamp < self.last_timestamp:
+                # Clock moved backward; wait to preserve monotonic IDs.
+                timestamp = self._wait_next_millis(self.last_timestamp)
+
+            if timestamp == self.last_timestamp:
+                self.sequence = (self.sequence + 1) & self.MAX_SEQUENCE
+                if self.sequence == 0:
+                    timestamp = self._wait_next_millis(self.last_timestamp)
+            else:
+                self.sequence = 0
+
+            self.last_timestamp = timestamp
+            return (
+                ((timestamp - self.EPOCH_MS) << self.TIMESTAMP_SHIFT)
+                | (self.worker_id << self.WORKER_ID_SHIFT)
+                | self.sequence
+            )
+
+
+snowflake = SnowflakeGenerator(SNOWFLAKE_WORKER_ID)
 
 
 def get_redis_client():
@@ -93,23 +152,21 @@ def index():
             # Auto-add https:// if the user didn't include a scheme
             if not original_url.startswith(('http://', 'https://')):
                 original_url = 'https://' + original_url
-            # Generate a short code from the row id using Base62 encoding.
+            # Generate short code from a Snowflake ID (Base62 encoded).
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    # Keep placeholder below VARCHAR(16) limit.
-                    placeholder_code = f"t{uuid.uuid4().hex[:12]}"
-                    cur.execute(
-                        "INSERT INTO urls (original_url, short_code, clicks, created_at) "
-                        "VALUES (%s, %s, %s, NOW()) RETURNING id",
-                        (original_url, placeholder_code, 0),
-                    )
-                    new_id = cur.fetchone()["id"]
-                    short_code = encode_base62(new_id)
-                    cur.execute(
-                        "UPDATE urls SET short_code = %s WHERE id = %s",
-                        (short_code, new_id),
-                    )
-                    conn.commit()
+                    while True:
+                        short_code = encode_base62(snowflake.next_id())
+                        try:
+                            cur.execute(
+                                "INSERT INTO urls (original_url, short_code, clicks, created_at) "
+                                "VALUES (%s, %s, %s, NOW())",
+                                (original_url, short_code, 0),
+                            )
+                            conn.commit()
+                            break
+                        except psycopg.errors.UniqueViolation:
+                            conn.rollback()
             redis_client = get_redis_client()
             if redis_client:
                 try:

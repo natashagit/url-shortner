@@ -54,7 +54,7 @@ The app will be available at:
 
 ## How It Works
 
-- Submitting a URL on `/` creates a Base62 short code from the row ID.
+- Submitting a URL on `/` creates a Base62 short code from a Twitter Snowflake-style ID.
 - The mapping is stored in PostgreSQL table `urls`.
 - Redis caches `short_code -> original_url` to speed up hot redirect traffic.
 - Visiting `/<short_code>` redirects to the original URL and increments `clicks`.
@@ -79,6 +79,11 @@ export DATABASE_URL="postgresql://user:password@localhost:5432/url_shortener"
   ```bash
   export REDIS_URL="redis://localhost:6379/0"
   export CACHE_TTL_SECONDS=3600
+  ```
+
+- Optional Snowflake worker configuration (for multi-instance deployments):
+  ```bash
+  export SNOWFLAKE_WORKER_ID=1
   ```
 
 - If a URL is entered without `http://` or `https://`, the app prepends `https://`.
